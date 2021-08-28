@@ -12,6 +12,8 @@
 #include <obs-module.h>
 #include <util/platform.h>
 
+using namespace std::placeholders;
+
 //----------------------------------------------------------[ obs/swr conversion
 
 int64_t obs_layout_to_swr_layout(speaker_layout layout)
@@ -188,13 +190,13 @@ void free_file(HANDLE file)
 
 //----------------------------------------------[ audio_pipe_manager::audio_pipe
 
-audio_pipe_manager::audio_pipe::audio_pipe(const std::string &name,
+audio_pipe_manager::audio_pipe::audio_pipe(std::string_view name,
 					   DWORD target_pid, audio_mixer *mixer)
-	: m_initialized(true), m_mixer(mixer), m_target_pid(target_pid)
+	: m_initialized(true),
+	  m_mixer(mixer),
+	  m_target_pid(target_pid),
+	  m_receiver(name, target_pid, std::bind(&audio_pipe_manager::audio_pipe::read, this, _1, _2))
 {
-	ipc_pipe_server_start(&m_pipe_server, name.c_str(), pipe_read, this);
-	m_pipe_server.read_data = nullptr;
-
 	// by default should basically do nothing and assume that the input
 	// audio is the same encoding as the desired output
 	m_swr_ctx = swr_alloc_set_opts(NULL, AUDIO_RESAMPLE_AV_CH_LAYOUT,
@@ -207,13 +209,56 @@ audio_pipe_manager::audio_pipe::audio_pipe(const std::string &name,
 	swr_init(m_swr_ctx);
 }
 
+audio_pipe_manager::audio_pipe::audio_pipe(audio_pipe &&other) noexcept
+	: m_initialized(other.m_initialized),
+	  m_receiver(std::move(other.m_receiver)),
+	  m_mixer(other.m_mixer),
+	  m_swr_ctx(other.m_swr_ctx),
+	  m_target_pid(other.m_target_pid),
+	  m_layout(other.m_layout),
+	  m_format(other.m_format),
+	  m_sample_rate(other.m_sample_rate),
+	  m_last_timestamp(other.m_last_timestamp)
+{
+	other.m_initialized = false;
+	other.m_mixer = nullptr;
+	other.m_swr_ctx = nullptr;
+	other.m_target_pid = 0;
+	other.m_layout = 0;
+	other.m_format = AV_SAMPLE_FMT_NONE;
+	other.m_sample_rate = 0;
+	other.m_last_timestamp = 0;
+}
+
 audio_pipe_manager::audio_pipe::~audio_pipe()
 {
-	if (!m_initialized)
-		return;
+	if (m_swr_ctx)
+		swr_free(&m_swr_ctx);
+}
 
-	ipc_pipe_server_free(&m_pipe_server);
-	swr_free(&m_swr_ctx);
+audio_pipe_manager::audio_pipe &
+audio_pipe_manager::audio_pipe::operator=(audio_pipe &&other)
+{
+	m_initialized = other.m_initialized;
+	m_receiver = std::move(other.m_receiver);
+	m_mixer = other.m_mixer;
+	m_swr_ctx = other.m_swr_ctx;
+	m_target_pid = other.m_target_pid;
+	m_layout = other.m_layout;
+	m_format = other.m_format;
+	m_sample_rate = other.m_sample_rate;
+	m_last_timestamp = other.m_last_timestamp;
+
+	other.m_initialized = false;
+	other.m_mixer = nullptr;
+	other.m_swr_ctx = nullptr;
+	other.m_target_pid = 0;
+	other.m_layout = 0;
+	other.m_format = AV_SAMPLE_FMT_NONE;
+	other.m_sample_rate = 0;
+	other.m_last_timestamp = 0;
+
+	return *this;
 }
 
 void audio_pipe_manager::audio_pipe::read(uint8_t *buffer, size_t size)
@@ -274,13 +319,6 @@ void audio_pipe_manager::audio_pipe::read(uint8_t *buffer, size_t size)
 	av_freep(&resampled_data);
 }
 
-void audio_pipe_manager::audio_pipe::pipe_read(void *self, uint8_t *buffer,
-					       size_t size)
-{
-	auto *pipe = (audio_pipe_manager::audio_pipe *)self;
-	pipe->read(buffer, size);
-}
-
 //----------------------------------------------------------[ audio_pipe_manager
 
 audio_pipe_manager::audio_pipe_manager(audio_mixer &mixer) : m_mixer(&mixer) {}
@@ -296,8 +334,8 @@ bool audio_pipe_manager::add(DWORD pid)
 		return false;
 
 	std::string name = AUDIO_PIPE_NAME + std::to_string(pid);
-	m_pipes.emplace(std::piecewise_construct, std::make_tuple(pid),
-			std::make_tuple(name, pid, m_mixer));
+	m_pipes[pid] = audio_pipe(name, pid, m_mixer);
+
 	return true;
 }
 

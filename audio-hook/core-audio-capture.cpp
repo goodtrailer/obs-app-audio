@@ -1,4 +1,5 @@
-#include "../audio-hook-info.h"
+#include "audio-hook-info.h"
+#include "win-pipe/win-pipe.h"
 
 #include <string>
 
@@ -9,10 +10,9 @@
 #include <type_traits>
 #include <windows.h>
 
-#include <ipc-util/pipe.h>
 #include <media-io/audio-io.h>
 
-static ipc_pipe_client_t g_pipe_client = {0};
+static win_pipe::sender g_sender;
 
 static HRESULT(WINAPI *g_original_get_buffer)(IUnknown *, UINT32,
 					      BYTE **) = nullptr;
@@ -31,17 +31,13 @@ static IAudioClient *g_audio_client = nullptr;
 static WAVEFORMATEX *g_wave_format = nullptr;
 static BYTE *g_data = nullptr;
 
-static bool init_pipe()
+static void init_pipe()
 {
-	ipc_pipe_client_free(&g_pipe_client);
-
+	
 	std::string name = AUDIO_PIPE_NAME;
 	name += std::to_string(GetCurrentProcessId());
 
-	if (!ipc_pipe_client_open(&g_pipe_client, name.c_str()))
-		return false;
-
-	return true;
+	g_sender = win_pipe::sender(name);
 }
 
 template<typename T> static inline void safe_release(T **out_COM_obj)
@@ -73,16 +69,6 @@ static bool hook_COM(IUnknown *COM_obj, void *hook_func,
 	vtable[offset] = hook_func;
 
 	return true;
-}
-
-inline bool try_pipe(ipc_pipe_client_t *client, void *buf, size_t size)
-{
-	for (int i = 0; i < AUDIO_PIPE_MAX_RETRY; i++) {
-		if (ipc_pipe_client_write(client, buf, size))
-			return true;
-		init_pipe();
-	}
-	return false;
 }
 
 HRESULT WINAPI get_buffer_hook(IUnknown *This, UINT32 NumFramesRequested,
@@ -172,14 +158,11 @@ HRESULT WINAPI release_buffer_hook(IUnknown *This, UINT32 NumFramesWritten,
 
 	for (size_t i = 0; i < buffer_count; i++) {
 		size_t offset = i * SAFE_DATA_SIZE;
-		uint64_t frame_delay =
-			NumFramesWritten - offset / g_wave_format->nBlockAlign;
-
 		size_t sub_data_size = min(SAFE_DATA_SIZE, data_size - offset);
 		md->frames =
 			(uint32_t)sub_data_size / g_wave_format->nBlockAlign;
 		memcpy(data, g_data + offset, sub_data_size);
-		try_pipe(&g_pipe_client, buffer, SAFE_BUF_SIZE);
+		g_sender.send(buffer, SAFE_BUF_SIZE);
 	}
 
 	return ret;
@@ -260,5 +243,4 @@ void core_audio_unhook()
 		CoTaskMemFree(g_wave_format);
 		CoUninitialize();
 	}
-	ipc_pipe_client_free(&g_pipe_client);
 }

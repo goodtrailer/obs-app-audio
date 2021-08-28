@@ -4,7 +4,7 @@
 
 #define AUDIO_PIPE_NAME "AudioHook_Pipe"
 #define AUDIO_PIPE_MAX_RETRY 4
-#define SAFE_BUF_SIZE (IPC_PIPE_BUF_SIZE - 8)
+#define SAFE_BUF_SIZE 12288
 #define SAFE_DATA_SIZE (SAFE_BUF_SIZE - sizeof(audio_metadata))
 #define MAX_BUF_COUNT 12
 

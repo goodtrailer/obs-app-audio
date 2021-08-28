@@ -9,7 +9,6 @@
 #include <Windows.h>
 
 #include <obs-module.h>
-#include <ipc-util/pipe.h>
 #include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>

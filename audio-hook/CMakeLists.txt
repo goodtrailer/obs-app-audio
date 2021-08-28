@@ -4,21 +4,17 @@ set(audio-hook_SOURCES
         audio-hook.cpp
         core-audio-capture.cpp)
 
-if(MSVC)
-        add_compile_options("$<IF:$<CONFIG:Debug>,/MTd,/MT>")
-        set(audio-hook_PLATFORM_DEPS
-                w32-pthreads)
-endif()
-
 add_library(audio-hook MODULE
-        ${audio-hook_SOURCES}
-        ${audio-hook_HEADERS})
+        ${audio-hook_SOURCES})
 
 target_include_directories(audio-hook PUBLIC
 	"..")
 
+target_compile_options(audio-hook PUBLIC
+        "$<IF:$<CONFIG:Debug>,/MTd,/MT>")
+
 target_link_libraries(audio-hook
-        ${audio-hook_PLATFORM_DEPS}
+        w32-pthreads
         libobs
         ipc-util
         psapi)

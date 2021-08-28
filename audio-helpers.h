@@ -1,5 +1,6 @@
 #pragma once
 #include "audio-hook-info.h"
+#include "win-pipe/win-pipe.h"
 
 #include <deque>
 #include <mutex>
@@ -8,7 +9,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include <ipc-util/pipe.h>
 #include <media-io/audio-io.h>
 #pragma warning(disable : 4244)
 extern "C" {
@@ -75,20 +75,23 @@ private:
 	public:
 		audio_pipe() = default;
 
-		audio_pipe(const std::string &name, DWORD target_pid, audio_mixer *mixer);
+		audio_pipe(std::string_view name, DWORD target_pid,
+			   audio_mixer *mixer);
 
-		audio_pipe(audio_pipe &&) = delete;
+		audio_pipe(const audio_pipe &) = delete;
+
+		audio_pipe(audio_pipe &&other) noexcept;
 
 		~audio_pipe();
 
-		void read(uint8_t *buffer, size_t size);
+		audio_pipe &operator=(audio_pipe &&other);
 
-		static void pipe_read(void *self, uint8_t *buffer, size_t size);
+		void read(uint8_t *buffer, size_t size);
 
 	private:
 		bool m_initialized = false;
 
-		ipc_pipe_server_t m_pipe_server;
+		win_pipe::receiver m_receiver;
 
 		audio_mixer *m_mixer = nullptr;
 
