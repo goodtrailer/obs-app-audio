@@ -1,0 +1,3 @@
+[submodule "win-pipe"]
+	path = win-pipe
+	url = https://github.com/goodtrailer/win-pipe
