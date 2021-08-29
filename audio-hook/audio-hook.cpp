@@ -9,11 +9,11 @@ extern void core_audio_unhook();
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
 {
-	if (reason == DLL_PROCESS_ATTACH) {
-		core_audio_hook();
-	} else if (reason == DLL_PROCESS_DETACH) {
-		core_audio_unhook();
-	}
+    if (reason == DLL_PROCESS_ATTACH) {
+        core_audio_hook();
+    } else if (reason == DLL_PROCESS_DETACH) {
+        core_audio_unhook();
+    }
 
-	return true;
+    return true;
 }
