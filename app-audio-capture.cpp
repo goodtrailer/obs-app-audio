@@ -3,6 +3,7 @@
 
 #include <codecvt>
 #include <filesystem>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -85,6 +86,8 @@ struct app_audio_capture_data {
 	audio_pipe_manager pipe_manager;
 	audio_mixer mixer;
 
+	std::mutex mutex;
+
 	app_audio_capture_data() { pipe_manager.set_mixer(mixer); }
 };
 
@@ -136,11 +139,8 @@ bool create_dll_injector_proc(std::string dll_injector_path,
 	return success;
 }
 
-void inject_hooks(app_audio_capture_data *aacd)
+void inject_hooks(const std::unordered_map<DWORD, bool> &processes)
 {
-	if (!aacd->app_manager.contains(aacd->target_session_name))
-		return;
-
 	std::string injector_path_32 =
 		std::filesystem::absolute(obs_module_file("dll-injector32.exe"))
 			.string();
@@ -165,10 +165,7 @@ void inject_hooks(app_audio_capture_data *aacd)
 		return;
 #endif
 
-	auto &application =
-		aacd->app_manager.applications().at(aacd->target_session_name);
-
-	for (const auto &[pid, x64] : application.processes()) {
+	for (const auto &[pid, x64] : processes) {
 #ifdef _WIN64
 		if (x64)
 			create_dll_injector_proc(injector_path_64, hook_path_64,
@@ -210,9 +207,9 @@ bool ensure_target_app_listed(obs_property_t *list, obs_data_t *settings,
 	return false;
 }
 
-bool fill_app_list(app_audio_capture_data *aacd, obs_property_t *list)
+bool fill_app_list(const application_manager &app_manager, obs_property_t *list)
 {
-	auto &apps = aacd->app_manager.applications();
+	auto apps = app_manager.applications();
 	for (auto &[name, app] : apps) {
 		std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
 		auto display_name = converter.to_bytes(app.display_name());
@@ -230,13 +227,16 @@ void update_apps_and_pipes(app_audio_capture_data *aacd)
 
 	std::unordered_set<DWORD> pids;
 	if (aacd->app_manager.contains(aacd->target_session_name)) {
-		auto &app = aacd->app_manager.applications().at(
-			aacd->target_session_name);
-		for (auto &[pid, x64] : app.processes())
+		auto procs = aacd->app_manager.applications()
+				     .at(aacd->target_session_name)
+				     .processes();
+		for (auto &[pid, x64] : procs) {
 			pids.insert(pid);
+		}
+
+		inject_hooks(procs);
 	}
 	aacd->pipe_manager.target(pids);
-	inject_hooks(aacd);
 }
 
 void output_audio(app_audio_capture_data *aacd)
@@ -263,6 +263,7 @@ void *audio_capture_thread(void *data)
 	uint64_t now = 0;
 
 	while (os_event_try(aacd->event) == EAGAIN) {
+		std::lock_guard lock(aacd->mutex);
 		now = os_gettime_ns();
 
 		// update cycle (injecting dll and refreshing pipes)
@@ -311,6 +312,7 @@ void app_audio_capture_defaults(obs_data_t *settings)
 void app_audio_capture_update(void *data, obs_data_t *settings)
 {
 	auto *aacd = (app_audio_capture_data *)data;
+	std::lock_guard lock(aacd->mutex);
 
 	aacd->update_rate =
 		(uint32_t)obs_data_get_int(settings, SETTING_UPDATE_RATE);
@@ -346,13 +348,15 @@ fail:
 obs_properties_t *app_audio_capture_properties(void *data)
 {
 	auto *aacd = (app_audio_capture_data *)data;
+	std::lock_guard lock(aacd->mutex);
+
 	obs_properties_t *ppts = obs_properties_create();
 
 	obs_property_t *app_list = obs_properties_add_list(
 		ppts, SETTING_TARGET_PROCESS, LABEL_TARGET_APPLICATION,
 		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(app_list, "", "");
-	fill_app_list(aacd, app_list);
+	fill_app_list(aacd->app_manager, app_list);
 	obs_property_modified_t callback = [](obs_properties_t *,
 					      obs_property_t *list,
 					      obs_data_t *settings) {

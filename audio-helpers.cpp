@@ -191,78 +191,61 @@ void free_file(HANDLE file)
 //----------------------------------------------[ audio_pipe_manager::audio_pipe
 
 audio_pipe_manager::audio_pipe::audio_pipe(std::string_view name,
-					   DWORD target_pid, audio_mixer *mixer)
-	: m_initialized(true),
-	  m_mixer(mixer),
-	  m_target_pid(target_pid),
-	  m_receiver(name, target_pid, std::bind(&audio_pipe_manager::audio_pipe::read, this, _1, _2))
+					   audio_mixer *mixer)
+	: m_receiver{name, std::bind(&audio_pipe::read, this, _1, _2)},
+	  m_info{
+		  .mixer = mixer,
+		  .layout = AUDIO_RESAMPLE_AV_CH_LAYOUT,
+		  .format = AUDIO_RESAMPLE_AV_SAMPLE_FMT,
+		  .sample_rate = AUDIO_RESAMPLE_SAMPLE_RATE,
+	  }
 {
 	// by default should basically do nothing and assume that the input
 	// audio is the same encoding as the desired output
-	m_swr_ctx = swr_alloc_set_opts(NULL, AUDIO_RESAMPLE_AV_CH_LAYOUT,
-				       AUDIO_RESAMPLE_AV_SAMPLE_FMT,
-				       AUDIO_RESAMPLE_SAMPLE_RATE,
-				       AUDIO_RESAMPLE_AV_CH_LAYOUT,
-				       AUDIO_RESAMPLE_AV_SAMPLE_FMT,
-				       AUDIO_RESAMPLE_SAMPLE_RATE, 0, NULL);
+	m_info.swr_ctx = swr_alloc_set_opts(
+		NULL, AUDIO_RESAMPLE_AV_CH_LAYOUT, AUDIO_RESAMPLE_AV_SAMPLE_FMT,
+		AUDIO_RESAMPLE_SAMPLE_RATE, AUDIO_RESAMPLE_AV_CH_LAYOUT,
+		AUDIO_RESAMPLE_AV_SAMPLE_FMT, AUDIO_RESAMPLE_SAMPLE_RATE, 0,
+		NULL);
 
-	swr_init(m_swr_ctx);
+	swr_init(m_info.swr_ctx);
 }
 
 audio_pipe_manager::audio_pipe::audio_pipe(audio_pipe &&other) noexcept
-	: m_initialized(other.m_initialized),
-	  m_receiver(std::move(other.m_receiver)),
-	  m_mixer(other.m_mixer),
-	  m_swr_ctx(other.m_swr_ctx),
-	  m_target_pid(other.m_target_pid),
-	  m_layout(other.m_layout),
-	  m_format(other.m_format),
-	  m_sample_rate(other.m_sample_rate),
-	  m_last_timestamp(other.m_last_timestamp)
+	: m_receiver{std::move(other.m_receiver)}, m_info{other.m_info}
 {
-	other.m_initialized = false;
-	other.m_mixer = nullptr;
-	other.m_swr_ctx = nullptr;
-	other.m_target_pid = 0;
-	other.m_layout = 0;
-	other.m_format = AV_SAMPLE_FMT_NONE;
-	other.m_sample_rate = 0;
-	other.m_last_timestamp = 0;
+	other.m_info = {};
+
+	m_receiver.set_callback(std::bind(&audio_pipe::read, this, _1, _2));
 }
 
 audio_pipe_manager::audio_pipe::~audio_pipe()
 {
-	if (m_swr_ctx)
-		swr_free(&m_swr_ctx);
+	if (m_info.swr_ctx)
+		swr_free(&m_info.swr_ctx);
 }
 
 audio_pipe_manager::audio_pipe &
-audio_pipe_manager::audio_pipe::operator=(audio_pipe &&other)
+audio_pipe_manager::audio_pipe::operator=(audio_pipe &&other) noexcept
 {
-	m_initialized = other.m_initialized;
 	m_receiver = std::move(other.m_receiver);
-	m_mixer = other.m_mixer;
-	m_swr_ctx = other.m_swr_ctx;
-	m_target_pid = other.m_target_pid;
-	m_layout = other.m_layout;
-	m_format = other.m_format;
-	m_sample_rate = other.m_sample_rate;
-	m_last_timestamp = other.m_last_timestamp;
+	m_info = other.m_info;
+	other.m_info = {};
 
-	other.m_initialized = false;
-	other.m_mixer = nullptr;
-	other.m_swr_ctx = nullptr;
-	other.m_target_pid = 0;
-	other.m_layout = 0;
-	other.m_format = AV_SAMPLE_FMT_NONE;
-	other.m_sample_rate = 0;
-	other.m_last_timestamp = 0;
+	m_receiver.set_callback(std::bind(&audio_pipe::read, this, _1, _2));
 
 	return *this;
 }
 
 void audio_pipe_manager::audio_pipe::read(uint8_t *buffer, size_t size)
 {
+	auto *&mixer = m_info.mixer;
+	auto *&swr_ctx = m_info.swr_ctx;
+	auto &layout = m_info.layout;
+	auto &format = m_info.format;
+	auto &sample_rate = m_info.sample_rate;
+	auto &last_timestamp = m_info.last_timestamp;
+
 	if (size < sizeof(struct audio_metadata))
 		return;
 
@@ -274,18 +257,17 @@ void audio_pipe_manager::audio_pipe::read(uint8_t *buffer, size_t size)
 	int64_t av_layout = obs_layout_to_swr_layout(md->layout);
 	enum AVSampleFormat av_format = obs_format_to_swr_format(md->format);
 
-	if (av_layout != m_layout || av_format != m_format ||
-	    md->samples_per_sec != m_sample_rate) {
-		m_swr_ctx = swr_alloc_set_opts(NULL,
-					       AUDIO_RESAMPLE_AV_CH_LAYOUT,
-					       AUDIO_RESAMPLE_AV_SAMPLE_FMT,
-					       AUDIO_RESAMPLE_SAMPLE_RATE,
-					       av_layout, av_format,
-					       md->samples_per_sec, 0, NULL);
-		swr_init(m_swr_ctx);
-		m_layout = av_layout;
-		m_format = av_format;
-		m_sample_rate = md->samples_per_sec;
+	if (av_layout != layout || av_format != format ||
+	    md->samples_per_sec != sample_rate) {
+		swr_ctx = swr_alloc_set_opts(NULL, AUDIO_RESAMPLE_AV_CH_LAYOUT,
+					     AUDIO_RESAMPLE_AV_SAMPLE_FMT,
+					     AUDIO_RESAMPLE_SAMPLE_RATE,
+					     av_layout, av_format,
+					     md->samples_per_sec, 0, NULL);
+		swr_init(swr_ctx);
+		layout = av_layout;
+		format = av_format;
+		sample_rate = md->samples_per_sec;
 	}
 
 	uint8_t *resampled_data;
@@ -294,28 +276,27 @@ void audio_pipe_manager::audio_pipe::read(uint8_t *buffer, size_t size)
 				    md->samples_per_sec, AV_ROUND_UP);
 	av_samples_alloc(&resampled_data, NULL, AUDIO_RESAMPLE_CHANNELS,
 			 resampled_frames, AUDIO_RESAMPLE_AV_SAMPLE_FMT, 0);
-	resampled_frames = swr_convert(m_swr_ctx, &resampled_data,
+	resampled_frames = swr_convert(swr_ctx, &resampled_data,
 				       resampled_frames, &data, md->frames);
 
 	uint64_t expected_timestamp =
-		m_last_timestamp +
-		m_mixer->calculate_duration(resampled_frames);
+		last_timestamp + mixer->calculate_duration(resampled_frames);
 
 	uint64_t deviation = timestamp < expected_timestamp
 				     ? expected_timestamp - timestamp
 				     : timestamp - expected_timestamp;
-	uint64_t epsilon = audio_mixer::calculate_duration(m_mixer->size()) *
+	uint64_t epsilon = audio_mixer::calculate_duration(mixer->size()) *
 			   (audio_mixer::NUM_VECS - 1) / audio_mixer::NUM_VECS;
 
 	// the timestamp is within expected random deviation
 	if (deviation < epsilon)
 		timestamp = expected_timestamp;
 
-	size_t index = m_mixer->calculate_index(timestamp);
-	m_mixer->mix_frames((struct audio_frame *)resampled_data,
-			    resampled_frames, index);
+	size_t index = mixer->calculate_index(timestamp);
+	mixer->mix_frames((struct audio_frame *)resampled_data,
+			  resampled_frames, index);
 
-	m_last_timestamp = timestamp;
+	last_timestamp = timestamp;
 	av_freep(&resampled_data);
 }
 
@@ -334,7 +315,7 @@ bool audio_pipe_manager::add(DWORD pid)
 		return false;
 
 	std::string name = AUDIO_PIPE_NAME + std::to_string(pid);
-	m_pipes[pid] = audio_pipe(name, pid, m_mixer);
+	m_pipes[pid] = audio_pipe{name, m_mixer};
 
 	return true;
 }
