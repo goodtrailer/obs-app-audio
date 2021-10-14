@@ -10,94 +10,122 @@
 #include <vector>
 
 #include <media-io/audio-io.h>
-#pragma warning(disable : 4244)
-extern "C" {
-#include <libswresample/swresample.h>
-}
-#pragma warning(default : 4244)
+#include <util/platform.h>
 
-struct audio_frame {
-    float samples[AUDIO_RESAMPLE_CHANNELS];
+struct audio_metadata {
+    speaker_layout layout;
+    audio_format format;
+    uint32_t sample_rate;
 };
 
-int64_t obs_layout_to_swr_layout(enum speaker_layout layout);
-
-AVSampleFormat obs_format_to_swr_format(audio_format format);
-
-// Uses 1/NUM_VECS of its size to buffer the past, just in case of shenanigans.
-// The rest of its size, which is (NUM_VECS - 1)/NUM_VECS, is for buffering
-// the future.
 class audio_mixer {
 public:
-    audio_mixer(size_t size = 0);
+    audio_mixer(size_t size, audio_metadata metadata)
+        : m_sample_rate { metadata.sample_rate }
+        , m_channels { get_audio_channels(metadata.layout) }
+    {
+        resize(size);
+    }
 
-    size_t calculate_index(uint64_t timestamp) const;
-    static size_t calculate_size(uint64_t duration);
-    uint64_t calculate_timestamp(size_t index) const;
-    static uint64_t calculate_duration(size_t size);
+    size_t calculate_index(uint64_t timestamp) const
+    {
+        return (size_t)((timestamp - m_timestamp) * m_sample_rate * 1e-9);
+    }
 
-    void resize(size_t size);
-    size_t size() const;
-    bool ready_to_pop() const;
-    uint64_t timestamp() const;
-    std::vector<audio_frame> pop();
-    void mix_frames(const audio_frame* frames_buffer, size_t frames_count,
-        size_t index);
-    void mix_frames(const std::vector<audio_frame>& frames, size_t index);
+    void resize(size_t size)
+    {
+        std::lock_guard lock = std::lock_guard(m_mutex);
+
+        size_t individual_vec_size = size / NUM_VECS;
+        if (individual_vec_size * NUM_VECS == m_size)
+            return;
+
+        m_size = individual_vec_size * NUM_VECS;
+
+        m_vecs.clear();
+        for (int i = 0; i < NUM_VECS; i++)
+            m_vecs.emplace_back(individual_vec_size);
+
+        m_timestamp = os_gettime_ns() - calculate_duration(m_size / NUM_VECS);
+    }
+
+    size_t size() const
+    {
+        return m_size;
+    }
+
+    uint64_t timestamp() const
+    {
+        return m_timestamp;
+    }
+
+    bool ready_to_pop() const
+    {
+        uint64_t delta = os_gettime_ns() - m_timestamp;
+        return delta > calculate_duration(m_size / NUM_VECS);
+    }
+
+    std::vector<AUDIO_PIPE_ASSUMED_TYPE> pop()
+    {
+        std::lock_guard lock = std::lock_guard(m_mutex);
+
+        std::vector<AUDIO_PIPE_ASSUMED_TYPE> ret = m_vecs[0];
+        m_vecs.pop_front();
+        m_vecs.emplace_back(ret.size());
+
+        m_timestamp += calculate_duration(m_size / NUM_VECS);
+        return ret;
+    }
+
+    void mix_frames(const AUDIO_PIPE_ASSUMED_TYPE* samples_buffer, size_t size,
+        size_t index)
+    {
+        std::lock_guard lock = std::lock_guard(m_mutex);
+
+        size_t vec_size = m_size / NUM_VECS;
+
+        unsigned int vec = (unsigned int)(index / vec_size);
+        unsigned int vec_index = (unsigned int)(index % vec_size);
+
+        size_t sample = 0;
+        size_t samples_count = size / sizeof(AUDIO_PIPE_ASSUMED_TYPE);
+
+        while (sample < samples_count && vec < m_vecs.size()) {
+            m_vecs[vec][vec_index] += samples_buffer[sample];
+
+            sample++;
+            vec_index++;
+            if (vec_index >= vec_size) {
+                vec_index = 0;
+                vec++;
+            }
+        }
+    }
+
+    void mix_frames(const std::vector<AUDIO_PIPE_ASSUMED_TYPE>& frames,
+        size_t index)
+    {
+        mix_frames(frames.data(), frames.size(), index);
+    }
 
 public:
     static constexpr int NUM_VECS = 3;
 
 private:
-    std::deque<std::vector<audio_frame>> m_vecs;
+    uint64_t calculate_duration(size_t size) const
+    {
+        return (uint64_t)(size * 1e9) / m_sample_rate;
+    }
+
+private:
+    std::deque<std::vector<AUDIO_PIPE_ASSUMED_TYPE>> m_vecs;
+
     uint64_t m_timestamp;
+    uint32_t m_sample_rate;
+    uint32_t m_channels;
+
     size_t m_size;
     std::mutex m_mutex;
-};
-
-class audio_pipe_manager {
-private:
-    class audio_pipe {
-        friend class audio_pipe_manager;
-
-    public:
-        audio_pipe() = default;
-        audio_pipe(std::string_view name, audio_mixer* mixer);
-        audio_pipe(audio_pipe&& other) noexcept;
-        ~audio_pipe();
-
-        audio_pipe& operator=(audio_pipe&& other) noexcept;
-
-        void read(uint8_t* buffer, size_t size);
-
-    private:
-        win_pipe::receiver m_receiver;
-
-        struct {
-            audio_mixer* mixer = nullptr;
-            SwrContext* swr_ctx = nullptr;
-            int64_t layout = 0;
-            AVSampleFormat format = AV_SAMPLE_FMT_NONE;
-            int sample_rate = 0;
-            uint64_t last_timestamp = 0;
-        } m_info;
-    };
-
-public:
-    audio_pipe_manager() = default;
-    audio_pipe_manager(audio_mixer& mixer);
-
-    void set_mixer(audio_mixer& mixer);
-    bool add(DWORD pid);
-    void remove(DWORD pid);
-    void clear();
-    bool contains(DWORD pid) const;
-    size_t size() const;
-    void target(const std::unordered_set<DWORD>& pids);
-
-private:
-    std::unordered_map<DWORD, audio_pipe> m_pipes;
-    audio_mixer* m_mixer = nullptr;
 };
 
 class application_manager {
@@ -116,8 +144,6 @@ public:
     };
 
 public:
-    application_manager() = default;
-
     const std::unordered_map<std::string, application>& applications() const;
     void add(const std::string& session_name, const std::wstring& display_name,
         DWORD pid, bool x64);
@@ -129,3 +155,7 @@ public:
 private:
     std::unordered_map<std::string, application> m_applications;
 };
+
+WAVEFORMATEX audio_device_format();
+
+audio_metadata wfmt_to_md(WAVEFORMATEX wfmt);

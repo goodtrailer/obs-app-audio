@@ -12,9 +12,6 @@
 #include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>
-#pragma warning(disable : 4244)
-#include <libswresample/swresample.h>
-#pragma warning(default : 4244)
 
 // clang-format off
 
@@ -63,6 +60,8 @@
 
 // clang-format on
 
+using namespace std::placeholders;
+
 struct app_audio_capture_data {
     obs_source_t* source = nullptr;
 
@@ -74,11 +73,30 @@ struct app_audio_capture_data {
     pthread_t thread = {};
     os_event_t* event = nullptr;
 
-    application_manager app_manager;
-    audio_pipe_manager pipe_manager;
+    const audio_metadata metadata;
+    const win_pipe::receiver receiver;
     audio_mixer mixer;
+    application_manager app_manager;
 
-    app_audio_capture_data() { pipe_manager.set_mixer(mixer); }
+    app_audio_capture_data(size_t size = 0)
+        : metadata { wfmt_to_md(audio_device_format()) }
+        , receiver {
+            AUDIO_PIPE_NAME,
+            std::bind(&app_audio_capture_data::callback, this, _1, _2)
+        }
+        , mixer { size, metadata }
+    {
+    }
+
+private:
+    void callback(uint8_t* buffer, size_t size)
+    {
+        pipe_metadata* md = (pipe_metadata*)buffer;
+        const uint8_t* data = (uint8_t*)buffer + sizeof(pipe_metadata);
+        
+        size_t index = mixer.calculate_index(md->timestamp);
+        mixer.mix_frames((AUDIO_PIPE_ASSUMED_TYPE*)data, size, index);
+    }
 };
 
 bool check_file_integrity(std::string filepath)
@@ -193,7 +211,7 @@ bool fill_app_list(const application_manager& app_manager, obs_property* list)
     return true;
 }
 
-void update_apps_and_pipes(app_audio_capture_data* aacd)
+void update_apps(app_audio_capture_data* aacd)
 {
     aacd->app_manager.refresh();
 
@@ -206,20 +224,19 @@ void update_apps_and_pipes(app_audio_capture_data* aacd)
             pids.insert(pid);
         inject_hooks(procs);
     }
-    aacd->pipe_manager.target(pids);
 }
 
 void output_audio(app_audio_capture_data* aacd)
 {
     uint64_t timestamp = aacd->mixer.timestamp();
-    std::vector<audio_frame> frames = aacd->mixer.pop();
+    std::vector<AUDIO_PIPE_ASSUMED_TYPE> samples = aacd->mixer.pop();
 
     obs_source_audio audio;
-    audio.data[0] = (uint8_t*)frames.data();
-    audio.frames = (uint32_t)frames.size();
-    audio.samples_per_sec = AUDIO_RESAMPLE_SAMPLE_RATE;
-    audio.format = AUDIO_RESAMPLE_AUDIO_FORMAT;
-    audio.speakers = AUDIO_RESAMPLE_SPEAKERS;
+    audio.data[0] = (uint8_t*)samples.data();
+    audio.frames = (uint32_t)samples.size();
+    audio.samples_per_sec = aacd->metadata.sample_rate;
+    audio.format = aacd->metadata.format;
+    audio.speakers = aacd->metadata.layout;
     audio.timestamp = timestamp;
 
     obs_source_output_audio(aacd->source, &audio);
@@ -227,7 +244,7 @@ void output_audio(app_audio_capture_data* aacd)
 
 void* audio_capture_thread(void* data)
 {
-    auto* aacd = (app_audio_capture_data*)data;
+    auto aacd = (app_audio_capture_data*)data;
 
     uint64_t last_update = os_gettime_ns();
     uint64_t now = 0;
@@ -235,9 +252,9 @@ void* audio_capture_thread(void* data)
     while (os_event_try(aacd->event) == EAGAIN) {
         now = os_gettime_ns();
 
-        // update cycle (injecting dll and refreshing pipes)
+        // update cycle (injecting dll)
         if (now - last_update < aacd->update_rate) {
-            update_apps_and_pipes(aacd);
+            update_apps(aacd);
             last_update = os_gettime_ns();
         }
 
@@ -257,7 +274,8 @@ const char* app_audio_capture_name(void*)
 
 void app_audio_capture_destroy(void* data)
 {
-    auto* aacd = (app_audio_capture_data*)data;
+    auto aacd = (app_audio_capture_data*)data;
+
     if (!aacd)
         return;
 
@@ -280,13 +298,14 @@ void app_audio_capture_defaults(obs_data* settings)
 
 void app_audio_capture_update(void* data, obs_data* settings)
 {
-    auto* aacd = (app_audio_capture_data*)data;
+    auto aacd = (app_audio_capture_data*)data;
 
     aacd->update_rate = (uint32_t)obs_data_get_int(settings, SETTING_UPDATE_RATE);
     aacd->buffer = (uint32_t)obs_data_get_int(settings, SETTING_BUFFER);
     aacd->target_session_name = obs_data_get_string(settings, SETTING_TARGET_PROCESS);
 
-    aacd->mixer.resize(audio_mixer::calculate_size(aacd->buffer));
+    size_t size = (size_t)(1e-9 * aacd->buffer * aacd->metadata.sample_rate);
+    aacd->mixer.resize(size);
 }
 
 void* app_audio_capture_create(obs_data* settings, obs_source* source)
