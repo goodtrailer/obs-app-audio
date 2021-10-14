@@ -18,6 +18,10 @@ struct audio_metadata {
     uint32_t sample_rate;
 };
 
+HANDLE create_file(const char* path);
+void write_file(HANDLE file, const void* buffer, DWORD size);
+void free_file(HANDLE file);
+
 class audio_mixer {
 public:
     audio_mixer(size_t size, audio_metadata metadata)
@@ -156,6 +160,6 @@ private:
     std::unordered_map<std::string, application> m_applications;
 };
 
-WAVEFORMATEX audio_device_format();
+audio_metadata audio_device_metadata();
 
-audio_metadata wfmt_to_md(WAVEFORMATEX wfmt);
+audio_metadata wfmt_to_md(WAVEFORMATEX* wfmt);

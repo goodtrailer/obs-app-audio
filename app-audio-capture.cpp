@@ -79,7 +79,7 @@ struct app_audio_capture_data {
     application_manager app_manager;
 
     app_audio_capture_data(size_t size = 0)
-        : metadata { wfmt_to_md(audio_device_format()) }
+        : metadata { audio_device_metadata() }
         , receiver {
             AUDIO_PIPE_NAME,
             std::bind(&app_audio_capture_data::callback, this, _1, _2)
@@ -92,10 +92,12 @@ private:
     void callback(uint8_t* buffer, size_t size)
     {
         pipe_metadata* md = (pipe_metadata*)buffer;
-        const uint8_t* data = (uint8_t*)buffer + sizeof(pipe_metadata);
-        
+        const uint8_t* data = (uint8_t*)buffer + sizeof(md);
+
+        size_t data_size = size - sizeof(md);
+
         size_t index = mixer.calculate_index(md->timestamp);
-        mixer.mix_frames((AUDIO_PIPE_ASSUMED_TYPE*)data, size, index);
+        mixer.mix_frames((AUDIO_PIPE_ASSUMED_TYPE*)data, data_size, index);
     }
 };
 
@@ -290,8 +292,7 @@ void app_audio_capture_destroy(void* data)
 
 void app_audio_capture_defaults(obs_data* settings)
 {
-    obs_data_set_default_int(settings, SETTING_UPDATE_RATE,
-        UPDATE_RATE_NORMAL);
+    obs_data_set_default_int(settings, SETTING_UPDATE_RATE, UPDATE_RATE_NORMAL);
     obs_data_set_default_string(settings, SETTING_TARGET_PROCESS, "");
     obs_data_set_default_int(settings, SETTING_BUFFER, BUFFER_NORMAL);
 }
@@ -304,7 +305,7 @@ void app_audio_capture_update(void* data, obs_data* settings)
     aacd->buffer = (uint32_t)obs_data_get_int(settings, SETTING_BUFFER);
     aacd->target_session_name = obs_data_get_string(settings, SETTING_TARGET_PROCESS);
 
-    size_t size = (size_t)(1e-9 * aacd->buffer * aacd->metadata.sample_rate);
+    size_t size = (size_t)aacd->buffer * aacd->metadata.sample_rate / 1'000'000'000;
     aacd->mixer.resize(size);
 }
 

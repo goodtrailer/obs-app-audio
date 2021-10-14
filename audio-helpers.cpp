@@ -23,7 +23,7 @@ HANDLE create_file(const char* path)
 #endif
 }
 
-void write_file(HANDLE file, void* buffer, DWORD size)
+void write_file(HANDLE file, const void* buffer, DWORD size)
 {
 #if _DEBUG
     WriteFile(file, buffer, size, NULL, NULL);
@@ -179,13 +179,12 @@ exit_uninitialize:
     return success;
 }
 
-WAVEFORMATEX audio_device_format()
+audio_metadata audio_device_metadata()
 {
-    WAVEFORMATEX ret {
-        .wFormatTag = WAVE_FORMAT_IEEE_FLOAT,
-        .nChannels = 2,
-        .nSamplesPerSec = 44100,
-        .wBitsPerSample = 32
+    audio_metadata ret {
+        .layout = speaker_layout::SPEAKERS_STEREO,
+        .format = audio_format::AUDIO_FORMAT_FLOAT,
+        .sample_rate = 44100,
     };
 
     if (FAILED(CoInitialize(NULL)))
@@ -211,7 +210,7 @@ WAVEFORMATEX audio_device_format()
     if (FAILED(store->GetValue(PKEY_AudioEngine_DeviceFormat, &prop)))
         goto exit_release_store;
 
-    ret = *(WAVEFORMATEX*)prop.blob.pBlobData;
+    ret = wfmt_to_md((WAVEFORMATEX*)prop.blob.pBlobData);
 
 exit_release_store:
     safe_release(&store);
@@ -224,35 +223,38 @@ exit_uninitialize:
     return ret;
 }
 
-audio_metadata wfmt_to_md(WAVEFORMATEX wfmt)
+audio_metadata wfmt_to_md(WAVEFORMATEX* wfmt)
 {
     audio_metadata md;
 
-    if (wfmt.cbSize < 22) {
-        if (wfmt.wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+    md.sample_rate = wfmt->nSamplesPerSec;
+
+    if (wfmt->cbSize < 22) {
+        if (wfmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
             md.format = AUDIO_FORMAT_FLOAT;
-        else if (wfmt.wBitsPerSample == 8)
+        else if (wfmt->wBitsPerSample == 8)
             md.format = AUDIO_FORMAT_U8BIT;
-        else if (wfmt.wBitsPerSample == 16)
+        else if (wfmt->wBitsPerSample == 16)
             md.format = AUDIO_FORMAT_16BIT;
-        else if (wfmt.wBitsPerSample == 32)
+        else if (wfmt->wBitsPerSample == 32)
             md.format = AUDIO_FORMAT_32BIT;
         else
             md.format = AUDIO_FORMAT_UNKNOWN;
 
-        md.layout = (speaker_layout)wfmt.nChannels;
+        md.layout = (speaker_layout)wfmt->nChannels;
     } else {
         auto &extensible = *(WAVEFORMATEXTENSIBLE*)&wfmt;
 
         GUID fmt = extensible.SubFormat;
+
         if (fmt == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)
             md.format = AUDIO_FORMAT_FLOAT;
         else if (fmt == KSDATAFORMAT_SUBTYPE_PCM) {
-            if (wfmt.wBitsPerSample == 8)
+            if (wfmt->wBitsPerSample == 8)
                 md.format = AUDIO_FORMAT_U8BIT;
-            else if (wfmt.wBitsPerSample == 16)
+            else if (wfmt->wBitsPerSample == 16)
                 md.format = AUDIO_FORMAT_16BIT;
-            else if (wfmt.wBitsPerSample == 32)
+            else if (wfmt->wBitsPerSample == 32)
                 md.format = AUDIO_FORMAT_32BIT;
             else
                 md.format = AUDIO_FORMAT_UNKNOWN;
@@ -278,7 +280,7 @@ audio_metadata wfmt_to_md(WAVEFORMATEX wfmt)
             md.layout = SPEAKERS_7POINT1;
             break;
         default:
-            md.layout = (speaker_layout)wfmt.nChannels;
+            md.layout = (speaker_layout)wfmt->nChannels;
         }
     }
 
